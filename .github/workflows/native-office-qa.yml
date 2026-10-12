@@ -1,0 +1,56 @@
+name: Office native platform QA
+on:
+  push:
+    paths: ['.github/workflows/native-office-qa.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  mac-native:
+    runs-on: macos-15
+    timeout-minutes: 10
+    steps:
+      - name: Native macOS and exact launcher JSON parser
+        shell: bash
+        run: |
+          set -euo pipefail
+          uname -sm
+          sw_vers
+          printf '{"Code":"TEST-ONLY","Product":"office2024"}' > /tmp/qa-order.json
+          value=$(osascript -l JavaScript -e 'function run(a){ObjC.import("Foundation");let d=$.NSData.dataWithContentsOfFile(a[0]);if(!d)throw Error("missing_file");let s=ObjC.unwrap($.NSString.alloc.initWithDataEncoding(d,$.NSUTF8StringEncoding));let v=JSON.parse(s);for(let k of a[1].split("."))v=v[k];if(v===undefined||v===null)throw Error("missing_field");return String(v);}' /tmp/qa-order.json Product)
+          test "$value" = office2024
+          echo 'Native Foundation/JXA parsing passed'
+      - name: Exact public Serializer checksum and Apple native trust
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --proto '=https' --proto-redir '=https' --tlsv1.2 --max-time 120 --output /tmp/serializer.pkg 'https://raw.githubusercontent.com/alsyundawy/Microsoft-Office-For-MacOS/bc79d366588a5113f43d9ea10bc3e5c751dea045/DATA/Microsoft_Office_LTSC_2024_VL_Serializer.pkg'
+          test "$(shasum -a 256 /tmp/serializer.pkg | awk '{print $1}')" = 083b505d9ac880629d7ef560e2baaaf59343721ac7e892be737a2403d7a63de1
+          pkgutil --check-signature /tmp/serializer.pkg
+          spctl --assess --type install --verbose=4 /tmp/serializer.pkg
+          echo 'Native Microsoft package trust and Gatekeeper passed'
+      - name: Document limits
+        if: always()
+        shell: bash
+        run: |
+          echo 'This job does not install Office, execute a Serializer, accept a Microsoft license or use customer credentials.'
+          echo 'Word/Excel installation and opening remain a separate acceptance test.'
+  windows-native:
+    runs-on: windows-2022
+    timeout-minutes: 5
+    steps:
+      - name: Native Windows client prerequisites and cryptography
+        shell: powershell
+        run: |
+          $ErrorActionPreference='Stop'
+          $PSVersionTable
+          Get-Command Get-FileHash,Expand-Archive,Get-CimInstance,Get-AuthenticodeSignature,Invoke-RestMethod
+          $rsa=New-Object Security.Cryptography.RSACryptoServiceProvider 2048
+          try {
+            $data=[Text.Encoding]::ASCII.GetBytes('QA only, no customer code')
+            $signature=$rsa.SignData($data,'SHA256')
+            if (!$rsa.VerifyData($data,'SHA256',$signature)) { throw 'Native signature failure' }
+            $data[0]=0
+            if ($rsa.VerifyData($data,'SHA256',$signature)) { throw 'Tampering was accepted' }
+          } finally {$rsa.Dispose()}
+          Write-Output 'Native Windows PowerShell commands and RS256 verification passed. No Office/MAS execution.'
