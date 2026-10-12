@@ -1,10 +1,17 @@
 name: Office disposable activation QA
 on:
   workflow_dispatch:
+    inputs:
+      platform:
+        description: Platform to test
+        type: choice
+        default: all
+        options: [all, windows, mac]
 permissions:
   contents: read
 jobs:
   mac-native:
+    if: ${{ inputs.platform != 'windows' }}
     runs-on: macos-15
     timeout-minutes: 25
     steps:
@@ -74,6 +81,7 @@ jobs:
         run: |
           echo 'Disposable VM only; installer result and license-file creation are tested. No paid customer code, Microsoft account, or private package is supplied. No retail entitlement or resale right is inferred.'
   office-apps-windows:
+    if: ${{ inputs.platform != 'mac' }}
     runs-on: windows-2022
     timeout-minutes: 25
     strategy:
@@ -122,6 +130,7 @@ jobs:
           Write-Output 'Official application installation/startup only. No MAS, customer code, Microsoft sign-in, automatic EULA acceptance or activation test.'
       - name: Execute pinned MAS or standalone Ohook without reducing endpoint protection
         shell: powershell
+        timeout-minutes: 6
         run: |
           $ErrorActionPreference='Stop'
           $root=Join-Path $env:RUNNER_TEMP 'official-office-qa'
@@ -141,8 +150,7 @@ jobs:
           Get-Process WINWORD,EXCEL,POWERPNT -ErrorAction SilentlyContinue | Stop-Process
           $stdout=Join-Path $root 'activation-stdout.log'
           $stderr=Join-Path $root 'activation-stderr.log'
-          $p=Start-Process -FilePath $env:ComSpec -ArgumentList ('/d /s /c ""'+$cmd+'" /Ohook"') -RedirectStandardOutput $stdout -RedirectStandardError $stderr -PassThru
-          if(!$p.WaitForExit(240000)) { $p.Kill(); throw 'Activator did not finish within four minutes' }
+          $p=Start-Process -FilePath $env:ComSpec -ArgumentList ('/d /s /c ""'+$cmd+'" /Ohook"') -RedirectStandardOutput $stdout -RedirectStandardError $stderr -Wait -PassThru
           $p.Refresh()
           $output=Get-Content -LiteralPath $stdout -Raw
           $clean=$output -replace '[A-Z0-9]{5}(-[A-Z0-9]{5}){4}','[REDACTED-GENERIC-KEY]'
@@ -188,8 +196,8 @@ jobs:
             $excel.DisplayAlerts=$false
             $book=$excel.Workbooks.Add()
             $sheet=$book.Worksheets.Item(1)
-            $sheet.Cells.Item(1,1).Value2=12
-            $sheet.Cells.Item(1,2).Value2=30
+            $sheet.Cells.Item(1,1).Value2=[double]12
+            $sheet.Cells.Item(1,2).Value2=[double]30
             $sheet.Cells.Item(1,3).Formula='=A1+B1'
             $excel.CalculateFull()
             if($sheet.Cells.Item(1,3).Value2 -ne 42) {throw 'Excel calculation failed'}
