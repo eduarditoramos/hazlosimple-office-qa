@@ -1,7 +1,5 @@
-name: Office native platform QA
+name: Office disposable activation QA
 on:
-  push:
-    paths: ['.github/workflows/native-office-qa.yml']
   workflow_dispatch:
 permissions:
   contents: read
@@ -47,31 +45,34 @@ jobs:
             pgrep -f "/Applications/$app.app/Contents/MacOS/"
             echo "INSTALLED_AND_RUNNING: $app"
           done
-          echo 'No Serializer executed and no Microsoft account or customer code supplied. App startup is not an activation test.'
+          echo 'Official installation and startup completed; Serializer is tested in the next step.'
+      - name: Execute exact Microsoft Serializer and inspect generated state
+        shell: bash
+        run: |
+          set -euo pipefail
+          license=/Library/Preferences/com.microsoft.office.licensingV2.plist
+          test ! -f "$license"
+          pkgutil --check-signature /tmp/serializer.pkg | grep -F 'Microsoft Corporation (UBF8T346G9)'
+          spctl --assess --type install /tmp/serializer.pkg
+          sudo installer -pkg /tmp/serializer.pkg -target /
+          sudo test -s "$license"
+          sudo plutil -lint "$license"
+          pkgutil --pkg-info com.microsoft.pkg.licensing
+          pkgutil --pkg-info com.microsoft.pkg.licensing.volume
+          echo 'SERIALIZER_EXECUTED: exit=0; new nonempty valid licensingV2 plist and package receipts present'
+          for app in 'Microsoft Word' 'Microsoft Excel' 'Microsoft PowerPoint'; do
+            pkill -f "/Applications/$app.app/Contents/MacOS/" || true
+            open -a "$app"
+            sleep 12
+            pgrep -f "/Applications/$app.app/Contents/MacOS/" > /dev/null
+            echo "POST_SERIALIZER_RUNNING: $app"
+          done
+          echo 'Mac license file created, but visible in-app activation and document editing are not asserted.'
       - name: Document limits
         if: always()
         shell: bash
         run: |
-          echo 'Official Office is installed in a disposable runner. Serializer execution, customer activation and document editing are not tested.'
-  windows-native:
-    runs-on: windows-2022
-    timeout-minutes: 5
-    steps:
-      - name: Native Windows client prerequisites and cryptography
-        shell: powershell
-        run: |
-          $ErrorActionPreference='Stop'
-          $PSVersionTable
-          Get-Command Get-FileHash,Expand-Archive,Get-CimInstance,Get-AuthenticodeSignature,Invoke-RestMethod | Select-Object Name,Source
-          $rsa=New-Object Security.Cryptography.RSACryptoServiceProvider 2048
-          try {
-            $data=[Text.Encoding]::ASCII.GetBytes('QA only, no customer code')
-            $signature=$rsa.SignData($data,'SHA256')
-            if (!$rsa.VerifyData($data,'SHA256',$signature)) { throw 'Native signature failure' }
-            $data[0]=0
-            if ($rsa.VerifyData($data,'SHA256',$signature)) { throw 'Tampering was accepted' }
-          } finally {$rsa.Dispose()}
-          Write-Output 'Native Windows PowerShell commands and RS256 verification passed. No Office/MAS execution.'
+          echo 'Disposable VM only; installer result and license-file creation are tested. No paid customer code, Microsoft account, or private package is supplied. No retail entitlement or resale right is inferred.'
   office-apps-windows:
     runs-on: windows-2022
     timeout-minutes: 25
@@ -79,8 +80,10 @@ jobs:
       fail-fast: false
       matrix:
         product: [office2024, m365]
+        activator: [ohook, mas-aio]
     env:
       QA_PRODUCT: ${{ matrix.product }}
+      QA_ACTIVATOR: ${{ matrix.activator }}
     steps:
       - name: Official Microsoft installer, installation and app startup
         shell: powershell
@@ -117,3 +120,87 @@ jobs:
             Write-Output ('INSTALLED_AND_RUNNING: '+$env:QA_PRODUCT+' '+$binary)
           }
           Write-Output 'Official application installation/startup only. No MAS, customer code, Microsoft sign-in, automatic EULA acceptance or activation test.'
+      - name: Execute pinned MAS or standalone Ohook without reducing endpoint protection
+        shell: powershell
+        run: |
+          $ErrorActionPreference='Stop'
+          $root=Join-Path $env:RUNNER_TEMP 'official-office-qa'
+          $prefix='https://raw.githubusercontent.com/massgravel/Microsoft-Activation-Scripts/6401d2f36975dc07bcb6d22ea823a8498a75ec01/MAS/'
+          if($env:QA_ACTIVATOR -eq 'ohook') {
+            $url=$prefix+'Separate-Files-Version/Activators/Ohook_Activation_AIO.cmd'
+            $expected='9c77ecce70a4c7161589dbbe20d9282a0b5071dba6260abb59ca35a765f475ef'
+          } else {
+            $url=$prefix+'All-In-One-Version-KL/MAS_AIO.cmd'
+            $expected='850f979665fb93999acae93f4790c1ff8ed2041532060b7966a121c2d29a0bfa'
+          }
+          $cmd=Join-Path $root 'activation.cmd'
+          Invoke-WebRequest -UseBasicParsing -Uri $url -OutFile $cmd
+          if((Get-FileHash -LiteralPath $cmd -Algorithm SHA256).Hash.ToLowerInvariant() -ne $expected) {throw 'Activator differs from exact packaged source'}
+          $defender=Get-MpComputerStatus -ErrorAction SilentlyContinue
+          Write-Output ('DEFENDER_BEFORE: realtime='+$defender.RealTimeProtectionEnabled+' antivirus='+$defender.AntivirusEnabled)
+          Get-Process WINWORD,EXCEL,POWERPNT -ErrorAction SilentlyContinue | Stop-Process
+          $stdout=Join-Path $root 'activation-stdout.log'
+          $stderr=Join-Path $root 'activation-stderr.log'
+          $p=Start-Process -FilePath $env:ComSpec -ArgumentList ('/d /s /c ""'+$cmd+'" /Ohook"') -RedirectStandardOutput $stdout -RedirectStandardError $stderr -PassThru
+          if(!$p.WaitForExit(240000)) { $p.Kill(); throw 'Activator did not finish within four minutes' }
+          $p.Refresh()
+          $output=Get-Content -LiteralPath $stdout -Raw
+          $clean=$output -replace '[A-Z0-9]{5}(-[A-Z0-9]{5}){4}','[REDACTED-GENERIC-KEY]'
+          $clean -split "`r?`n" | Where-Object {$_ -match 'activated|errors were detected|Aborting|Failed|successful|sandbox'} | Select-Object -Last 30 | Write-Output
+          if($p.ExitCode -ne 0 -or $output -notmatch 'Office is permanently activated\.' -or $output -match 'Some errors were detected\.') {throw ('Activator did not report successful completion. Exit='+$p.ExitCode)}
+          $hooks=@(Get-ChildItem -LiteralPath (Join-Path $env:ProgramFiles 'Microsoft Office/root') -Filter 'sppc.dll' -Recurse -File)
+          if($hooks.Count -lt 1) {throw 'Activator success message without installed Ohook component'}
+          $defenderAfter=Get-MpComputerStatus -ErrorAction SilentlyContinue
+          if($defender.RealTimeProtectionEnabled -and !$defenderAfter.RealTimeProtectionEnabled) {throw 'Realtime protection unexpectedly changed'}
+          Write-Output ('ACTIVATOR_EXECUTED: product='+$env:QA_PRODUCT+' method='+$env:QA_ACTIVATOR+' exit='+$p.ExitCode+' success_message=true hook_present=true')
+          Write-Output ('DEFENDER_AFTER: realtime='+$defenderAfter.RealTimeProtectionEnabled+' antivirus='+$defenderAfter.AntivirusEnabled)
+          $office=Join-Path $env:ProgramFiles 'Microsoft Office/root/Office16'
+          foreach($binary in @('WINWORD.EXE','EXCEL.EXE','POWERPNT.EXE')) {
+            Start-Process -FilePath (Join-Path $office $binary) | Out-Null
+            Start-Sleep -Seconds 12
+            if(!(Get-Process -Name ([IO.Path]::GetFileNameWithoutExtension($binary)) -ErrorAction SilentlyContinue)) {throw ('App failed after activation '+$binary)}
+            Write-Output ('POST_OHOOK_RUNNING: '+$env:QA_PRODUCT+' '+$env:QA_ACTIVATOR+' '+$binary)
+          }
+          Write-Output 'Ohook is a licensing hook; its own success message is not proof of Microsoft license entitlement or a Microsoft 365 subscription.'
+      - name: Create, save and reopen a Word document and Excel workbook
+        shell: powershell
+        timeout-minutes: 4
+        run: |
+          $ErrorActionPreference='Stop'
+          $root=Join-Path $env:RUNNER_TEMP 'official-office-qa'
+          Get-Process WINWORD,EXCEL,POWERPNT -ErrorAction SilentlyContinue | Stop-Process
+          $word=$null; $excel=$null
+          try {
+            $word=New-Object -ComObject Word.Application
+            $word.Visible=$false
+            $word.DisplayAlerts=0
+            $doc=$word.Documents.Add()
+            $doc.Content.Text='HazloSimple disposable activation QA'
+            $docpath=Join-Path $root 'qa-document.docx'
+            $doc.SaveAs2($docpath,16)
+            $doc.Close(0)
+            $opened=$word.Documents.Open($docpath,$false,$true)
+            if($opened.Content.Text -notmatch 'HazloSimple disposable activation QA') {throw 'Word content did not survive save and reopen'}
+            $opened.Close(0)
+            Write-Output ('DOCUMENT_EDIT_SAVE_REOPEN: '+$env:QA_PRODUCT+' '+$env:QA_ACTIVATOR+' Word')
+            $excel=New-Object -ComObject Excel.Application
+            $excel.Visible=$false
+            $excel.DisplayAlerts=$false
+            $book=$excel.Workbooks.Add()
+            $sheet=$book.Worksheets.Item(1)
+            $sheet.Cells.Item(1,1).Value2=12
+            $sheet.Cells.Item(1,2).Value2=30
+            $sheet.Cells.Item(1,3).Formula='=A1+B1'
+            $excel.CalculateFull()
+            if($sheet.Cells.Item(1,3).Value2 -ne 42) {throw 'Excel calculation failed'}
+            $bookpath=Join-Path $root 'qa-workbook.xlsx'
+            $book.SaveAs($bookpath,51)
+            $book.Close($false)
+            $openedBook=$excel.Workbooks.Open($bookpath)
+            if($openedBook.Worksheets.Item(1).Cells.Item(1,3).Value2 -ne 42) {throw 'Excel result did not survive save and reopen'}
+            $openedBook.Close($false)
+            Write-Output ('DOCUMENT_EDIT_SAVE_REOPEN: '+$env:QA_PRODUCT+' '+$env:QA_ACTIVATOR+' Excel')
+          } finally {
+            if($word){$word.Quit()}
+            if($excel){$excel.Quit()}
+          }
