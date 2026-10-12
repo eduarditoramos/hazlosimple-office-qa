@@ -8,7 +8,7 @@ permissions:
 jobs:
   mac-native:
     runs-on: macos-15
-    timeout-minutes: 10
+    timeout-minutes: 25
     steps:
       - name: Native macOS and exact launcher JSON parser
         shell: bash
@@ -29,12 +29,30 @@ jobs:
           pkgutil --check-signature /tmp/serializer.pkg
           spctl --assess --type install --verbose=4 /tmp/serializer.pkg
           echo 'Native Microsoft package trust and Gatekeeper passed'
+      - name: Install official Office and check app processes on disposable Mac
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --proto '=https' --proto-redir '=https' --tlsv1.2 --connect-timeout 20 --max-time 600 --retry 2 --output /tmp/office.pkg 'https://res.public.onecdn.static.microsoft/mro1cdnstorage/C1297A47-86C4-4C1F-97FA-950631F94777/MacAutoupdate/Microsoft_365_and_Office_16.113.26100421_Installer.pkg'
+          signature=$(LC_ALL=C pkgutil --check-signature /tmp/office.pkg)
+          printf '%s\n' "$signature"
+          printf '%s\n' "$signature" | grep -F 'Microsoft Corporation (UBF8T346G9)'
+          spctl --assess --type install /tmp/office.pkg
+          sudo installer -pkg /tmp/office.pkg -target /
+          for app in 'Microsoft Word' 'Microsoft Excel' 'Microsoft PowerPoint'; do
+            test -d "/Applications/$app.app"
+            codesign --verify --deep --strict "/Applications/$app.app"
+            open -a "$app"
+            sleep 12
+            pgrep -f "/Applications/$app.app/Contents/MacOS/"
+            echo "INSTALLED_AND_RUNNING: $app"
+          done
+          echo 'No Serializer executed and no Microsoft account or customer code supplied. App startup is not an activation test.'
       - name: Document limits
         if: always()
         shell: bash
         run: |
-          echo 'This job does not install Office, execute a Serializer, accept a Microsoft license or use customer credentials.'
-          echo 'Word/Excel installation and opening remain a separate acceptance test.'
+          echo 'Official Office is installed in a disposable runner. Serializer execution, customer activation and document editing are not tested.'
   windows-native:
     runs-on: windows-2022
     timeout-minutes: 5
@@ -44,7 +62,7 @@ jobs:
         run: |
           $ErrorActionPreference='Stop'
           $PSVersionTable
-          Get-Command Get-FileHash,Expand-Archive,Get-CimInstance,Get-AuthenticodeSignature,Invoke-RestMethod
+          Get-Command Get-FileHash,Expand-Archive,Get-CimInstance,Get-AuthenticodeSignature,Invoke-RestMethod | Select-Object Name,Source
           $rsa=New-Object Security.Cryptography.RSACryptoServiceProvider 2048
           try {
             $data=[Text.Encoding]::ASCII.GetBytes('QA only, no customer code')
@@ -54,3 +72,48 @@ jobs:
             if ($rsa.VerifyData($data,'SHA256',$signature)) { throw 'Tampering was accepted' }
           } finally {$rsa.Dispose()}
           Write-Output 'Native Windows PowerShell commands and RS256 verification passed. No Office/MAS execution.'
+  office-apps-windows:
+    runs-on: windows-2022
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        product: [office2024, m365]
+    env:
+      QA_PRODUCT: ${{ matrix.product }}
+    steps:
+      - name: Official Microsoft installer, installation and app startup
+        shell: powershell
+        run: |
+          $ErrorActionPreference='Stop'
+          $root=Join-Path $env:RUNNER_TEMP 'official-office-qa'
+          New-Item -ItemType Directory -Path $root -Force | Out-Null
+          $odt=Join-Path $root 'odt.exe'
+          Invoke-WebRequest -UseBasicParsing -Uri 'https://download.microsoft.com/download/6c1eeb25-cf8b-41d9-8d0d-cc1dbc032140/officedeploymenttool_20326-20112.exe' -OutFile $odt
+          $signature=Get-AuthenticodeSignature -LiteralPath $odt
+          if ($signature.Status -ne 'Valid' -or $signature.SignerCertificate.Subject -notmatch 'Microsoft Corporation') { throw 'Untrusted Microsoft download' }
+          $extract=Start-Process -FilePath $odt -ArgumentList ('/quiet /extract:"'+$root+'"') -Wait -PassThru
+          if ($extract.ExitCode -ne 0) { throw 'ODT extraction failed' }
+          $setup=Join-Path $root 'setup.exe'
+          if ((Get-AuthenticodeSignature -LiteralPath $setup).Status -ne 'Valid') { throw 'Invalid setup signature' }
+          $productId=if($env:QA_PRODUCT -eq 'office2024'){'ProPlus2024Volume'}else{'O365ProPlusRetail'}
+          $channel=if($env:QA_PRODUCT -eq 'office2024'){'PerpetualVL2024'}else{'Current'}
+          $version=if($env:QA_PRODUCT -eq 'm365'){'Version="16.0.20430.20146"'}else{''}
+          $config=Join-Path $root 'configuration.xml'
+          ('<Configuration><Add SourcePath="'+$root+'" OfficeClientEdition="64" Channel="'+$channel+'" '+$version+'><Product ID="'+$productId+'"><Language ID="es-es"/><ExcludeApp ID="Teams"/><ExcludeApp ID="OneDrive"/></Product></Add><Display Level="None" AcceptEULA="FALSE"/><Property Name="FORCEAPPSHUTDOWN" Value="FALSE"/><Property Name="AUTOACTIVATE" Value="0"/></Configuration>') | Set-Content -LiteralPath $config -Encoding UTF8
+          $download=Start-Process -FilePath $setup -ArgumentList ('/download "'+$config+'"') -Wait -PassThru
+          if ($download.ExitCode -ne 0) { throw ('Office download failed '+$download.ExitCode) }
+          $install=Start-Process -FilePath $setup -ArgumentList ('/configure "'+$config+'"') -Wait -PassThru
+          if ($install.ExitCode -notin @(0,3010)) { throw ('Office installation failed '+$install.ExitCode) }
+          $office=Join-Path $env:ProgramFiles 'Microsoft Office/root/Office16'
+          foreach($binary in @('WINWORD.EXE','EXCEL.EXE','POWERPNT.EXE')) {
+            $path=Join-Path $office $binary
+            if (!(Test-Path -LiteralPath $path)) { throw ('Missing application '+$binary) }
+            if ((Get-AuthenticodeSignature -LiteralPath $path).Status -ne 'Valid') { throw ('Invalid application signature '+$binary) }
+            $process=Start-Process -FilePath $path -PassThru
+            Start-Sleep -Seconds 12
+            $name=[IO.Path]::GetFileNameWithoutExtension($binary)
+            if (!(Get-Process -Name $name -ErrorAction SilentlyContinue)) { throw ('Application did not remain running '+$binary) }
+            Write-Output ('INSTALLED_AND_RUNNING: '+$env:QA_PRODUCT+' '+$binary)
+          }
+          Write-Output 'Official application installation/startup only. No MAS, customer code, Microsoft sign-in, automatic EULA acceptance or activation test.'
