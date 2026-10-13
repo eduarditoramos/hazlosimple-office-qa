@@ -34,9 +34,37 @@ function BasicTest {
     Add-Type -AssemblyName UIAutomationClient
     Add-Type -AssemblyName UIAutomationTypes
     Add-Type -AssemblyName System.Windows.Forms
-    $rectangle=[Windows.Automation.AutomationElement]::FromHandle($app.MainWindowHandle).Current.BoundingRectangle
-    $screen=[Windows.Forms.Screen]::PrimaryScreen.Bounds
-    Report 'document_ready_for_input' @{expected_text='HazloSimple editado en Windows LTSC';window_handle=$app.MainWindowHandle.ToInt64();click_x=[int]($rectangle.Left+100);click_y=[int]($rectangle.Top+100);screen_width=$screen.Width;screen_height=$screen.Height}
+    # Exercise the actual edit control and the application's Save menu command.
+    # A headless QEMU keyboard can move the pointer without delivering keystrokes.
+    Add-Type -TypeDefinition @'
+using System;
+using System.Text;
+using System.Runtime.InteropServices;
+public static class HZSNotepad {
+ [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern IntPtr FindWindowEx(IntPtr parent, IntPtr after, string cls, string title);
+ [DllImport("user32.dll", CharSet=CharSet.Unicode, EntryPoint="SendMessageW")] public static extern IntPtr SetText(IntPtr h, uint m, IntPtr w, string text);
+ [DllImport("user32.dll", EntryPoint="SendMessageW")] public static extern IntPtr Command(IntPtr h, uint m, IntPtr w, IntPtr l);
+ [DllImport("user32.dll")] public static extern IntPtr GetMenu(IntPtr h);
+ [DllImport("user32.dll")] public static extern IntPtr GetSubMenu(IntPtr h, int pos);
+ [DllImport("user32.dll")] public static extern int GetMenuItemCount(IntPtr h);
+ [DllImport("user32.dll")] public static extern uint GetMenuItemID(IntPtr h, int pos);
+ [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern int GetMenuString(IntPtr h, uint item, StringBuilder text, int size, uint flags);
+}
+'@
+    $editHandle=[HZSNotepad]::FindWindowEx($app.MainWindowHandle,[IntPtr]::Zero,'Edit',$null)
+    if($editHandle -eq [IntPtr]::Zero){throw 'Native Notepad Edit control unavailable'}
+    $expected='HazloSimple editado en Windows LTSC'
+    [HZSNotepad]::Command($editHandle,0x00B1,[IntPtr]::Zero,[IntPtr](-1)) | Out-Null
+    [HZSNotepad]::SetText($editHandle,0x00C2,[IntPtr]1,$expected) | Out-Null
+    $menu=[HZSNotepad]::GetSubMenu([HZSNotepad]::GetMenu($app.MainWindowHandle),0)
+    $saveId=$null
+    for($position=0;$position -lt [HZSNotepad]::GetMenuItemCount($menu);$position++) {
+        $caption=New-Object Text.StringBuilder 256
+        [HZSNotepad]::GetMenuString($menu,$position,$caption,256,0x0400) | Out-Null
+        if(($caption.ToString().Split([char]9)[0] -replace '&','').Trim() -eq 'Save') {$saveId=[HZSNotepad]::GetMenuItemID($menu,$position);break}
+    }
+    if($null -eq $saveId -or $saveId -eq [uint32]::MaxValue){throw 'Notepad Save command unavailable'}
+    [HZSNotepad]::Command($app.MainWindowHandle,0x0111,[IntPtr]([int]$saveId),[IntPtr]::Zero) | Out-Null
     for($wait=0;$wait -lt 15;$wait++) {if ((Get-Content -LiteralPath $file -Raw).Trim() -eq 'HazloSimple editado en Windows LTSC'){break};Start-Sleep 1}
     if ((Get-Content -LiteralPath $file -Raw).Trim() -ne 'HazloSimple editado en Windows LTSC') {throw 'Notepad editing/save failed'}
     Stop-Process -Id $app.Id
@@ -57,7 +85,7 @@ function BasicTest {
     elseif($edit.TryGetCurrentPattern([Windows.Automation.ValuePattern]::Pattern,[ref]$pattern)) {$value=$pattern.Current.Value}
     else {throw 'Notepad text control has no readable automation pattern'}
     if ($value.Trim() -ne 'HazloSimple editado en Windows LTSC') {throw 'Reopened document contents differ'}
-    Report 'document_edit_saved_reopened' @{notepad=$true;file_sha256=(Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash}
+    Report 'document_edit_saved_reopened' @{notepad=$true;method='Native Edit control + discovered Save menu command + reopened UIAutomation text';file_sha256=(Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash}
 }
 try {
     if($Bootstrap) {
