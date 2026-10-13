@@ -25,25 +25,34 @@ function BasicTest {
     $file=Join-Path $desktop 'HazloSimple-prueba.txt'
     Set-Content -LiteralPath $file -Value 'HazloSimple original' -Encoding UTF8
     $app=Start-Process notepad.exe -ArgumentList ('"'+$file+'"') -PassThru
-    Start-Sleep 4
+    for($wait=0;$wait -lt 30;$wait++) {$app.Refresh();if($app.MainWindowHandle -ne 0){break};Start-Sleep 2}
+    if($app.MainWindowHandle -eq 0){throw 'Notepad did not expose a desktop window within 60 seconds'}
     $shell=New-Object -ComObject WScript.Shell
     if (!$shell.AppActivate($app.Id)) {throw 'Notepad window unavailable'}
     $shell.SendKeys('^a');$shell.SendKeys('HazloSimple editado en Windows LTSC');$shell.SendKeys('^s');Start-Sleep 2
     if ((Get-Content -LiteralPath $file -Raw).Trim() -ne 'HazloSimple editado en Windows LTSC') {throw 'Notepad editing/save failed'}
     Stop-Process -Id $app.Id
     $reopened=Start-Process notepad.exe -ArgumentList ('"'+$file+'"') -PassThru
-    Start-Sleep 3
+    for($wait=0;$wait -lt 30;$wait++) {$reopened.Refresh();if($reopened.MainWindowHandle -ne 0){break};Start-Sleep 2}
+    if($reopened.MainWindowHandle -eq 0){throw 'Reopened Notepad window unavailable'}
     Add-Type -AssemblyName UIAutomationClient
     Add-Type -AssemblyName UIAutomationTypes
     $reopened.Refresh()
     $window=[Windows.Automation.AutomationElement]::FromHandle($reopened.MainWindowHandle)
-    $condition=New-Object Windows.Automation.PropertyCondition([Windows.Automation.AutomationElement]::ControlTypeProperty,[Windows.Automation.ControlType]::Edit)
+    $editCondition=New-Object Windows.Automation.PropertyCondition([Windows.Automation.AutomationElement]::ControlTypeProperty,[Windows.Automation.ControlType]::Edit)
+    $documentCondition=New-Object Windows.Automation.PropertyCondition([Windows.Automation.AutomationElement]::ControlTypeProperty,[Windows.Automation.ControlType]::Document)
+    $condition=New-Object Windows.Automation.OrCondition($editCondition,$documentCondition)
     $edit=$window.FindFirst([Windows.Automation.TreeScope]::Descendants,$condition)
-    $value=$edit.GetCurrentPattern([Windows.Automation.ValuePattern]::Pattern).Current.Value
+    if(!$edit){throw 'Notepad text control unavailable'}
+    $pattern=$null
+    if($edit.TryGetCurrentPattern([Windows.Automation.TextPattern]::Pattern,[ref]$pattern)) {$value=$pattern.DocumentRange.GetText(-1)}
+    elseif($edit.TryGetCurrentPattern([Windows.Automation.ValuePattern]::Pattern,[ref]$pattern)) {$value=$pattern.Current.Value}
+    else {throw 'Notepad text control has no readable automation pattern'}
     if ($value.Trim() -ne 'HazloSimple editado en Windows LTSC') {throw 'Reopened document contents differ'}
     Report 'document_edit_saved_reopened' @{notepad=$true;file_sha256=(Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash}
 }
 try {
+    if (!(Test-Path -LiteralPath "$root\await-reboot.json")) {Report 'guest_started' @{desktop_settle_seconds=60};Start-Sleep 60}
     $edition=Edition
     if ($edition.EditionID -ne 'EnterpriseS' -or $edition.CurrentBuild -ne '19044') {throw 'Unexpected Windows edition/build'}
     $os=Get-CimInstance Win32_OperatingSystem
@@ -92,6 +101,6 @@ try {
     Restart-Computer -Force
 } catch {
     $message=$_.Exception.Message -replace '[A-Z0-9]{5}(-[A-Z0-9]{5}){4}','[GENERIC-KEY-REDACTED]'
-    Report 'failed' @{passed=$false;error=$message}
+    Report 'failed' @{passed=$false;error=$message;line=$_.InvocationInfo.ScriptLineNumber}
     exit 1
 }
