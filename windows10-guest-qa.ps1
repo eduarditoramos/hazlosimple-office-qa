@@ -55,6 +55,8 @@ function BasicTest {
 try {
     if($Bootstrap) {
         Report 'bootstrap_received' @{phase='first_logon'}
+        & powercfg.exe -change monitor-timeout-ac 0
+        & powercfg.exe -change standby-timeout-ac 0
         $startAction=New-ScheduledTaskAction -Execute powershell.exe -Argument '-NoProfile -ExecutionPolicy Bypass -File C:\HZSQA\guest.ps1'
         $startTrigger=New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(1)
         $startPrincipal=New-ScheduledTaskPrincipal -UserId HZSQA -LogonType Interactive -RunLevel Highest
