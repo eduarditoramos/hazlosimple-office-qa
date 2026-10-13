@@ -30,7 +30,12 @@ function BasicTest {
     if($app.MainWindowHandle -eq 0){throw 'Notepad did not expose a desktop window within 60 seconds'}
     $shell=New-Object -ComObject WScript.Shell
     if (!$shell.AppActivate($app.Id)) {throw 'Notepad window unavailable'}
-    Report 'document_ready_for_input' @{expected_text='HazloSimple editado en Windows LTSC';window_handle=$app.MainWindowHandle.ToInt64()}
+    Add-Type -AssemblyName UIAutomationClient
+    Add-Type -AssemblyName UIAutomationTypes
+    Add-Type -AssemblyName System.Windows.Forms
+    $rectangle=[Windows.Automation.AutomationElement]::FromHandle($app.MainWindowHandle).Current.BoundingRectangle
+    $screen=[Windows.Forms.Screen]::PrimaryScreen.Bounds
+    Report 'document_ready_for_input' @{expected_text='HazloSimple editado en Windows LTSC';window_handle=$app.MainWindowHandle.ToInt64();click_x=[int]($rectangle.Left+100);click_y=[int]($rectangle.Top+100);screen_width=$screen.Width;screen_height=$screen.Height}
     for($wait=0;$wait -lt 15;$wait++) {if ((Get-Content -LiteralPath $file -Raw).Trim() -eq 'HazloSimple editado en Windows LTSC'){break};Start-Sleep 1}
     if ((Get-Content -LiteralPath $file -Raw).Trim() -ne 'HazloSimple editado en Windows LTSC') {throw 'Notepad editing/save failed'}
     Stop-Process -Id $app.Id
