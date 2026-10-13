@@ -93,6 +93,8 @@ try:
         if process.poll() is not None:raise RuntimeError('QEMU failed to start: '+(ROOT/'qemu.log').read_text())
         if time.monotonic()-start>20:raise TimeoutError('QMP socket unavailable')
         time.sleep(1)
+    run(['sudo','chown',f'{os.getuid()}:{os.getgid()}',str(ROOT/'qmp.sock')])
+    os.chmod(ROOT/'qmp.sock',0o600)
     for _ in range(3):
         time.sleep(2);monitor('human-monitor-command',{'command-line':'sendkey spc'})
     print('WINDOWS_ISO_VM_BOOT_STARTED',flush=True)
