@@ -27,6 +27,15 @@ class Receiver(http.server.BaseHTTPRequestHandler):
         print('GUEST_EVENT '+json.dumps(value),flush=True)
         if value['stage']=='document_ready_for_input':
             assert value['details']['expected_text']=='HazloSimple editado en Windows LTSC'
+            info=value['details']
+            assert 0<info['click_x']<info['screen_width'] and 0<info['click_y']<info['screen_height']
+            monitor('input-send-event',{'events':[
+                {'type':'abs','data':{'axis':'x','value':round(info['click_x']*32767/(info['screen_width']-1))}},
+                {'type':'abs','data':{'axis':'y','value':round(info['click_y']*32767/(info['screen_height']-1))}}]})
+            monitor('input-send-event',{'events':[{'type':'btn','data':{'button':'left','down':True}}]})
+            time.sleep(.15)
+            monitor('input-send-event',{'events':[{'type':'btn','data':{'button':'left','down':False}}]})
+            time.sleep(.2)
             monitor('human-monitor-command',{'command-line':'sendkey ctrl-a'})
             time.sleep(.2)
             for char in value['details']['expected_text']:
@@ -97,7 +106,7 @@ try:
           '-drive',f'file={ISO},if=ide,index=2,media=cdrom,readonly=on',
           '-drive',f'file={ROOT}/seed.iso,if=ide,index=3,media=cdrom,readonly=on',
           '-boot','once=d,order=c','-netdev','user,id=net0','-device','e1000,netdev=net0',
-          '-display','none','-vga','std','-qmp',f'unix:{ROOT}/qmp.sock,server=on,wait=off',
+          '-display','none','-vga','std','-usb','-device','usb-tablet','-qmp',f'unix:{ROOT}/qmp.sock,server=on,wait=off',
           '-pidfile',str(ROOT/'qemu.pid'),'-rtc','base=utc']
     process=subprocess.Popen(args,stdout=log,stderr=log)
     start=time.monotonic()
