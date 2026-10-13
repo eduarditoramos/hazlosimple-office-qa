@@ -25,6 +25,8 @@ class Receiver(http.server.BaseHTTPRequestHandler):
         events.append(value)
         with (RESULT/'guest-events.ndjson').open('a') as f:f.write(json.dumps(value)+'\n')
         print('GUEST_EVENT '+json.dumps(value),flush=True)
+        if value['stage']=='document_edit_saved_reopened':
+            screenshot('notepad-edited-saved')
         if value['stage']=='document_ready_for_input':
             assert value['details']['expected_text']=='HazloSimple editado en Windows LTSC'
             info=value['details']
