@@ -25,6 +25,18 @@ class Receiver(http.server.BaseHTTPRequestHandler):
         events.append(value)
         with (RESULT/'guest-events.ndjson').open('a') as f:f.write(json.dumps(value)+'\n')
         print('GUEST_EVENT '+json.dumps(value),flush=True)
+        if value['stage']=='document_ready_for_input':
+            assert value['details']['expected_text']=='HazloSimple editado en Windows LTSC'
+            monitor('human-monitor-command',{'command-line':'sendkey ctrl-a'})
+            time.sleep(.2)
+            for char in value['details']['expected_text']:
+                key='spc' if char==' ' else ('shift-'+char.lower() if char.isupper() else char)
+                assert key=='spc' or char.isascii() and char.isalpha()
+                monitor('human-monitor-command',{'command-line':'sendkey '+key})
+                time.sleep(.15)
+            monitor('human-monitor-command',{'command-line':'sendkey ctrl-s'})
+            time.sleep(1)
+            screenshot('notepad-edited-saved')
         self.send_response(200);self.end_headers();self.wfile.write(b'OK')
         if value['stage'] in ('complete','failed'):finished.set()
 server=http.server.ThreadingHTTPServer(('127.0.0.1',8765),Receiver)
