@@ -1,3 +1,4 @@
+param([switch]$Bootstrap)
 $ErrorActionPreference='Stop'
 $root='C:\HZSQA'
 if (!(Test-Path -LiteralPath $root)) {
@@ -52,6 +53,15 @@ function BasicTest {
     Report 'document_edit_saved_reopened' @{notepad=$true;file_sha256=(Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash}
 }
 try {
+    if($Bootstrap) {
+        Report 'bootstrap_received' @{phase='first_logon'}
+        $startAction=New-ScheduledTaskAction -Execute powershell.exe -Argument '-NoProfile -ExecutionPolicy Bypass -File C:\HZSQA\guest.ps1'
+        $startTrigger=New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(1)
+        $startPrincipal=New-ScheduledTaskPrincipal -UserId HZSQA -LogonType Interactive -RunLevel Highest
+        Register-ScheduledTask -TaskName HazloSimpleBootstrapQA -Action $startAction -Trigger $startTrigger -Principal $startPrincipal -Force | Out-Null
+        Report 'bootstrap_scheduled' @{delay_seconds=60}
+        exit
+    }
     if (!(Test-Path -LiteralPath "$root\await-reboot.json")) {Report 'guest_started' @{desktop_settle_seconds=60};Start-Sleep 60}
     $edition=Edition
     if ($edition.EditionID -ne 'EnterpriseS' -or $edition.CurrentBuild -ne '19044') {throw 'Unexpected Windows edition/build'}
@@ -69,6 +79,7 @@ try {
         Start-Sleep 8
         Report 'complete' @{passed=$true;activation_method='MAS AIO / TSforge';post_reboot_license_status=1;retail_entitlement_verified=$false}
         Unregister-ScheduledTask -TaskName HazloSimpleDisposableQA -Confirm:$false
+        Unregister-ScheduledTask -TaskName HazloSimpleBootstrapQA -Confirm:$false -ErrorAction SilentlyContinue
         exit
     }
     Report 'installed_desktop' @{edition=$edition;caption=$os.Caption;architecture=$os.OSArchitecture;ui_language=(Get-UICulture).Name;license_before=(Licensing)}
