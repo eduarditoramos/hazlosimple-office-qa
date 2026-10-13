@@ -1,5 +1,6 @@
 param([switch]$Bootstrap)
 $ErrorActionPreference='Stop'
+$ProgressPreference='SilentlyContinue'
 $root='C:\HZSQA'
 if (!(Test-Path -LiteralPath $root)) {
     $seed=(Get-CimInstance Win32_LogicalDisk | Where-Object VolumeName -eq 'HZSQA' | Select-Object -First 1).DeviceID
@@ -63,7 +64,7 @@ try {
         Report 'bootstrap_received' @{phase='first_logon'}
         & powercfg.exe -change monitor-timeout-ac 0
         & powercfg.exe -change standby-timeout-ac 0
-        $startAction=New-ScheduledTaskAction -Execute powershell.exe -Argument '-NoProfile -ExecutionPolicy Bypass -File C:\HZSQA\guest.ps1'
+        $startAction=New-ScheduledTaskAction -Execute powershell.exe -Argument '-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File C:\HZSQA\guest.ps1'
         $startTrigger=New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(1)
         $startPrincipal=New-ScheduledTaskPrincipal -UserId HZSQA -LogonType Interactive -RunLevel Highest
         Register-ScheduledTask -TaskName HazloSimpleBootstrapQA -Action $startAction -Trigger $startTrigger -Principal $startPrincipal -Force | Out-Null
@@ -85,18 +86,22 @@ try {
         Report 'reboot_verified' @{edition=$edition;licensing=$licensed;desktop=$true}
         Start-Process 'ms-settings:activation'
         Start-Sleep 8
-        Report 'complete' @{passed=$true;activation_method='MAS AIO / TSforge';post_reboot_license_status=1;retail_entitlement_verified=$false}
+        $checksFailed=@($previous.check_errors | Where-Object {$_})
+        Report 'complete' @{passed=($checksFailed.Count -eq 0);check_errors=$checksFailed;activation_method='MAS AIO / TSforge';post_reboot_license_status=1;retail_entitlement_verified=$false}
         Unregister-ScheduledTask -TaskName HazloSimpleDisposableQA -Confirm:$false
         Unregister-ScheduledTask -TaskName HazloSimpleBootstrapQA -Confirm:$false -ErrorAction SilentlyContinue
         exit
     }
     Report 'installed_desktop' @{edition=$edition;caption=$os.Caption;architecture=$os.OSArchitecture;ui_language=(Get-UICulture).Name;license_before=(Licensing)}
-    BasicTest
-    Resolve-DnsName www.microsoft.com -ErrorAction Stop | Out-Null
-    [Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12
-    $internet=Invoke-WebRequest -UseBasicParsing 'https://www.microsoft.com' -TimeoutSec 40
-    if ($internet.StatusCode -ne 200) {throw 'Microsoft HTTPS connectivity failed'}
-    Report 'network_https' @{dns=$true;https=$true}
+    $checkErrors=@()
+    try {BasicTest} catch {$checkErrors+='document: '+$_.Exception.Message;Report 'document_test_failed' @{error=$_.Exception.Message;line=$_.InvocationInfo.ScriptLineNumber}}
+    try {
+        Resolve-DnsName www.microsoft.com -ErrorAction Stop | Out-Null
+        [Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12
+        $internet=Invoke-WebRequest -UseBasicParsing 'https://www.microsoft.com' -TimeoutSec 40
+        if ($internet.StatusCode -ne 200) {throw 'Microsoft HTTPS connectivity failed'}
+        Report 'network_https' @{dns=$true;https=$true}
+    } catch {$checkErrors+='network: '+$_.Exception.Message;Report 'network_test_failed' @{error=$_.Exception.Message}}
     $defender=Get-MpComputerStatus
     Report 'defender_before' @{antivirus=$defender.AntivirusEnabled;realtime=$defender.RealTimeProtectionEnabled}
     $activator="$root\MAS_AIO.cmd"
@@ -111,8 +116,8 @@ try {
     $summary=@($lines -split "`r?`n" | Where-Object {$_ -match 'activated|Failed|Aborting|errors were detected|successful'} | Select-Object -Last 12)
     Report 'activation_result' @{exit_code=$process.ExitCode;licensing=$licensed;summary=$summary;realtime_after=$after.RealTimeProtectionEnabled}
     if ($process.ExitCode -ne 0 -or !($licensed | Where-Object LicenseStatus -eq 1)) {throw 'Activator or Windows licensing check failed'}
-    @{boot=$os.LastBootUpTime.ToUniversalTime().ToString('o');defender_realtime=$defender.RealTimeProtectionEnabled} | ConvertTo-Json | Set-Content "$root\await-reboot.json"
-    $action=New-ScheduledTaskAction -Execute powershell.exe -Argument '-NoProfile -ExecutionPolicy Bypass -File C:\HZSQA\guest.ps1'
+    @{boot=$os.LastBootUpTime.ToUniversalTime().ToString('o');defender_realtime=$defender.RealTimeProtectionEnabled;check_errors=$checkErrors} | ConvertTo-Json | Set-Content "$root\await-reboot.json"
+    $action=New-ScheduledTaskAction -Execute powershell.exe -Argument '-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File C:\HZSQA\guest.ps1'
     $trigger=New-ScheduledTaskTrigger -AtLogOn -User HZSQA
     $principal=New-ScheduledTaskPrincipal -UserId HZSQA -LogonType Interactive -RunLevel Highest
     Register-ScheduledTask -TaskName HazloSimpleDisposableQA -Action $action -Trigger $trigger -Principal $principal -Force | Out-Null
