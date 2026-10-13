@@ -1,0 +1,25 @@
+name: Windows 10 VM preflight
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  preflight:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Check disposable runner virtualization and disk
+        run: |
+          set -euo pipefail
+          uname -m
+          ls -l /dev/kvm
+          sudo test -r /dev/kvm
+          sudo test -w /dev/kvm
+          df -h "$RUNNER_TEMP"
+          test "$(df --output=avail -B1 "$RUNNER_TEMP" | tail -1)" -gt 22000000000
+          echo KVM_PREFLIGHT_PASS
+      - name: Check publicly available exact ISO source
+        run: |
+          set -euo pipefail
+          curl --fail --location --head --proto '=https' --proto-redir '=https' --max-time 60 'https://drive.massgrave.dev/en-us_windows_10_enterprise_ltsc_2021_x64_dvd_d289cf96.iso'
+          echo ISO_SOURCE_PREFLIGHT_PASS
