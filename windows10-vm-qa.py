@@ -1,5 +1,5 @@
 """Install exact LTSC ISO into a disposable KVM guest; retain only QA results/screens."""
-import hashlib,http.server,json,os,secrets,socket,subprocess,threading,time,xml.etree.ElementTree as ET
+import base64,hashlib,http.server,json,os,secrets,socket,subprocess,threading,time,xml.etree.ElementTree as ET
 from pathlib import Path
 BASE=Path(__file__).resolve().parent
 ROOT=Path(os.environ['RUNNER_TEMP'])/'hzs-windows10-vm'
@@ -74,7 +74,8 @@ try:
     template=(BASE/'windows10-unattend.xml').read_text().replace('__PASSWORD__',PASSWORD)
     tree=ET.fromstring(template)
     command=tree.find('.//{urn:schemas-microsoft-com:unattend}CommandLine')
-    command.text='powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "$d=(Get-CimInstance Win32_LogicalDisk | Where-Object VolumeName -eq \'HZSQA\' | Select-Object -First 1).DeviceID; & ($d+\'\\guest.ps1\')"'
+    init="$d=(Get-CimInstance Win32_LogicalDisk | Where-Object VolumeName -eq 'HZSQA' | Select-Object -First 1).DeviceID; Start-Process powershell.exe -WindowStyle Hidden -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-File',($d+'\\guest.ps1'))"
+    command.text='powershell.exe -NoProfile -ExecutionPolicy Bypass -EncodedCommand '+base64.b64encode(init.encode('utf-16-le')).decode('ascii')
     ET.register_namespace('','urn:schemas-microsoft-com:unattend');ET.register_namespace('wcm','http://schemas.microsoft.com/WMIConfig/2002/State')
     ET.ElementTree(tree).write(SEED/'Autounattend.xml',encoding='utf-8',xml_declaration=True)
     run(['genisoimage','-quiet','-J','-r','-V','HZSQA','-o',str(ROOT/'seed.iso'),str(SEED)])
