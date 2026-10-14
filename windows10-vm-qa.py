@@ -1,5 +1,5 @@
 """Install exact LTSC ISO into a disposable KVM guest; retain only QA results/screens."""
-import hashlib,http.server,json,os,secrets,socket,subprocess,threading,time,xml.etree.ElementTree as ET
+import base64,concurrent.futures,hashlib,http.server,json,os,secrets,socket,subprocess,threading,time,urllib.request,xml.etree.ElementTree as ET
 from pathlib import Path
 BASE=Path(__file__).resolve().parent
 ROOT=Path(os.environ['RUNNER_TEMP'])/'hzs-windows10-vm'
@@ -58,6 +58,43 @@ def sha(path):
         for block in iter(lambda:f.read(4*1024*1024),b''):value.update(block)
     return value.hexdigest()
 def run(args):subprocess.run(args,check=True)
+def download_ranges(url,user,password,destination,total=4899461120,chunk_size=64*1024*1024):
+    """Retry only the interrupted block; reject ignored or incorrect Range replies."""
+    chunks=destination.parent/'iso-chunks';chunks.mkdir(mode=0o700)
+    authorization='Basic '+base64.b64encode((user+':'+password).encode()).decode()
+    count=(total+chunk_size-1)//chunk_size
+    def fetch(index):
+        first=index*chunk_size;last=min(total-1,first+chunk_size-1)
+        target=chunks/f'{index:04}.part'
+        for attempt in range(3):
+            try:
+                request=urllib.request.Request(url,headers={'Authorization':authorization,'Range':f'bytes={first}-{last}'})
+                with urllib.request.urlopen(request,timeout=90) as response:
+                    assert response.status==206,'Range request was not honored'
+                    assert response.headers.get('Content-Range')==f'bytes {first}-{last}/{total}','Unexpected block boundaries'
+                    with target.open('wb') as output:
+                        while True:
+                            data=response.read(4*1024*1024)
+                            if not data:break
+                            output.write(data)
+                assert target.stat().st_size==last-first+1,'Incomplete block'
+                return index,last-first+1
+            except Exception:
+                target.unlink(missing_ok=True)
+                if attempt==2:raise RuntimeError(f'ISO block {index} could not be transferred') from None
+                time.sleep(2)
+    completed=0;received=0
+    with concurrent.futures.ThreadPoolExecutor(max_workers=3) as pool:
+        for future in concurrent.futures.as_completed([pool.submit(fetch,index) for index in range(count)]):
+            _,size=future.result();completed+=1;received+=size
+            print(f'ISO_DOWNLOAD_PROGRESS blocks={completed}/{count} bytes={received}/{total}',flush=True)
+    with destination.open('wb') as output:
+        for index in range(count):
+            chunk=chunks/f'{index:04}.part'
+            with chunk.open('rb') as source:
+                for data in iter(lambda:source.read(4*1024*1024),b''):output.write(data)
+            chunk.unlink()
+    chunks.rmdir()
 def monitor(command,args=None):
     with socket.socket(socket.AF_UNIX) as s:
         s.settimeout(8);s.connect(str(ROOT/'qmp.sock'))
@@ -79,13 +116,10 @@ def screenshot(name):
 process=None
 try:
     assert Path('/dev/kvm').is_char_device()
-    access=ROOT/'iso-download.conf'
     user=os.environ['HZS_QA_ISO_USER'];password=os.environ['HZS_QA_ISO_PASSWORD'];url=os.environ['HZS_QA_ISO_URL']
     assert url=='https://nextcloud-159-54-129-141.sslip.io/public.php/webdav'
-    access.write_text('url = '+json.dumps(url)+'\nuser = '+json.dumps(user+':'+password)+'\n',encoding='utf-8');access.chmod(0o600)
     print('Downloading exact private ISO via temporary read-only share...',flush=True)
-    run(['curl','--fail','--location','--proto','=https','--proto-redir','=https','--connect-timeout','20','--max-time','600','--retry','1','--silent','--show-error','--config',str(access),'--output',str(ISO)])
-    access.unlink()
+    download_ranges(url,user,password,ISO)
     assert ISO.stat().st_size==4899461120
     assert sha(ISO)=='c90a6df8997bf49e56b9673982f3e80745058723a707aef8f22998ae6479597d'
     print('EXACT_ISO_DOWNLOADED_HASH_VERIFIED',flush=True)
