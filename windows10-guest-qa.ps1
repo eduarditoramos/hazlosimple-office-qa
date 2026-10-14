@@ -43,6 +43,7 @@ using System.Runtime.InteropServices;
 public static class HZSNotepad {
  [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern IntPtr FindWindowEx(IntPtr parent, IntPtr after, string cls, string title);
  [DllImport("user32.dll", CharSet=CharSet.Unicode, EntryPoint="SendMessageW")] public static extern IntPtr SetText(IntPtr h, uint m, IntPtr w, string text);
+ [DllImport("user32.dll", CharSet=CharSet.Unicode, EntryPoint="SendMessageW")] public static extern IntPtr ReadText(IntPtr h, uint m, IntPtr capacity, StringBuilder text);
  [DllImport("user32.dll", EntryPoint="SendMessageW")] public static extern IntPtr Command(IntPtr h, uint m, IntPtr w, IntPtr l);
  [DllImport("user32.dll")] public static extern IntPtr GetMenu(IntPtr h);
  [DllImport("user32.dll")] public static extern IntPtr GetSubMenu(IntPtr h, int pos);
@@ -71,21 +72,13 @@ public static class HZSNotepad {
     $reopened=Start-Process notepad.exe -ArgumentList ('"'+$file+'"') -PassThru
     for($wait=0;$wait -lt 30;$wait++) {$reopened.Refresh();if($reopened.MainWindowHandle -ne 0){break};Start-Sleep 2}
     if($reopened.MainWindowHandle -eq 0){throw 'Reopened Notepad window unavailable'}
-    Add-Type -AssemblyName UIAutomationClient
-    Add-Type -AssemblyName UIAutomationTypes
     $reopened.Refresh()
-    $window=[Windows.Automation.AutomationElement]::FromHandle($reopened.MainWindowHandle)
-    $editCondition=New-Object Windows.Automation.PropertyCondition([Windows.Automation.AutomationElement]::ControlTypeProperty,[Windows.Automation.ControlType]::Edit)
-    $documentCondition=New-Object Windows.Automation.PropertyCondition([Windows.Automation.AutomationElement]::ControlTypeProperty,[Windows.Automation.ControlType]::Document)
-    $condition=New-Object Windows.Automation.OrCondition($editCondition,$documentCondition)
-    $edit=$window.FindFirst([Windows.Automation.TreeScope]::Descendants,$condition)
-    if(!$edit){throw 'Notepad text control unavailable'}
-    $pattern=$null
-    if($edit.TryGetCurrentPattern([Windows.Automation.TextPattern]::Pattern,[ref]$pattern)) {$value=$pattern.DocumentRange.GetText(-1)}
-    elseif($edit.TryGetCurrentPattern([Windows.Automation.ValuePattern]::Pattern,[ref]$pattern)) {$value=$pattern.Current.Value}
-    else {throw 'Notepad text control has no readable automation pattern'}
-    if ($value.Trim() -ne 'HazloSimple editado en Windows LTSC') {throw 'Reopened document contents differ'}
-    Report 'document_edit_saved_reopened' @{notepad=$true;method='Native Edit control + discovered Save menu command + reopened UIAutomation text';file_sha256=(Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash}
+    $reopenedEdit=[HZSNotepad]::FindWindowEx($reopened.MainWindowHandle,[IntPtr]::Zero,'Edit',$null)
+    if($reopenedEdit -eq [IntPtr]::Zero){throw 'Reopened native Notepad Edit control unavailable'}
+    $reopenedText=New-Object Text.StringBuilder 4096
+    [HZSNotepad]::ReadText($reopenedEdit,0x000D,[IntPtr]4096,$reopenedText) | Out-Null
+    if ($reopenedText.ToString().Trim() -ne 'HazloSimple editado en Windows LTSC') {throw 'Reopened document contents differ'}
+    Report 'document_edit_saved_reopened' @{notepad=$true;method='Native Edit control + discovered Save menu command + reopened native window text';file_sha256=(Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash}
 }
 try {
     if($Bootstrap) {
